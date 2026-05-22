@@ -150,12 +150,7 @@ def find_length_rank(data, rank=1):
     base = 3
     auto_corr = acf(data, nlags=400, fft=True)[base:]
     
-    # plot_acf(data, lags=400, fft=True)
-    # plt.xlabel('Lags')
-    # plt.ylabel('Autocorrelation')
-    # plt.title('Autocorrelation Function (ACF)')
-    # plt.savefig('/data/liuqinghua/code/ts/TSAD-AutoML/AutoAD_Solution/candidate_pool/cd_diagram/ts_acf.png')
-
+    
     local_max = argrelextrema(auto_corr, np.greater)[0]
 
     # print('auto_corr: ', auto_corr)
