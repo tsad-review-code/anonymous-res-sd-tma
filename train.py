@@ -13,7 +13,8 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
                 lr=1e-4, see_loss=None):
 
     # ==========================================
-    # 基础超参数设定 (沿用基线对比学习框架的训练配置)
+    # Basic hyperparameter settings
+    # inherited from the baseline contrastive learning framework.
     # ==========================================
     radius = 2
     lambda_weight = 1
@@ -47,7 +48,7 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
 
             iteration_count += 1
 
-            # 动态更新余弦退火学习率
+            # Dynamically update the cosine-annealed learning rate.
             lr = cosine_annealed_lr(iteration_count)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
@@ -60,8 +61,10 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
             total_len = len(train_patches)
 
             # ==========================================
-            # 模块 1: 构建正样本 (Positive Samples)
-            # 逻辑：基于时间平滑性假设，在时间轴邻域内随机选择相邻的 Patch 作为正样本 Z_i^+
+            # Module 1: construct positive samples.
+            # Logic: based on the temporal smoothness assumption, randomly select
+            # neighboring patches within the temporal neighborhood as positive
+            # samples Z_i^+.
             # ==========================================
             _cand = batch_indexes.view(-1, 1) + _offsets.view(1, -1)      # (M, 2r)
             _valid = (_cand >= 0) & (_cand < total_len)
@@ -74,7 +77,7 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
                 _pos_idx[_none_valid] = batch_indexes[_none_valid]
             positives = torch.stack([train_patches[i] for i in _pos_idx.tolist()], dim=0).to(device, non_blocking=True)
 
-            # 动态衰减时间代理任务的权重 lambda
+            # Dynamically decay the weight lambda of the temporal pretext task.
             if iteration_count < (num_iter / 10) :
                 current_lambda_pretext = lambda_weight * (1 - (iteration_count / (num_iter / 10)))
             else:
@@ -82,8 +85,9 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
 
             if current_lambda_pretext > 0.0:
                 # ==========================================
-                # 模块 2: 获取真实的前置时间片段 (Pretext Patches)
-                # 逻辑：提取 h_i^{pre}，用于后续构建具有真实物理时间连续性的验证样本对
+                # Module 2: obtain true preceding temporal patches.
+                # Logic: extract h_i^{pre} for constructing sample pairs with
+                # true physical temporal continuity in the subsequent pretext task.
                 # ==========================================
                 pretext_patches = []
                 pretext_valid_mask = []
@@ -103,7 +107,8 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
                 pretext_patches = torch.cat(pretext_patches, dim=0).to(device, non_blocking=True)
                 pretext_valid_mask = torch.tensor(pretext_valid_mask, dtype=torch.bool, device=device)
 
-                # 将 Anchor, 正样本以及前置片段拼接，统一执行前向传播提取紧凑表征 (Embedding)
+                # Concatenate anchors, positive samples, and preceding patches,
+                # then perform a unified forward pass to extract compact embeddings.
                 all_patches = torch.cat([anchors, positives, pretext_patches], dim=0)
                 all_embeddings = model.embedding(all_patches)
 
@@ -115,7 +120,7 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
                 pretext_patches    = None
                 pretext_valid_mask = None
 
-                # 仅包含 Anchor 与 正样本
+                # Include only anchors and positive samples.
                 all_patches = torch.cat([anchors, positives], dim=0)
                 all_embeddings = model.embedding(all_patches)
 
@@ -123,8 +128,9 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
                 h_pos     = all_embeddings[M:2*M]
 
             # ==========================================
-            # 模块 3: 优化三元组对比损失 (Triplet Contrastive Loss, L_triplet)
-            # 目标：迫使网络挖掘时间序列的内在正常流形 (intrinsic normal manifold)
+            # Module 3: optimize the triplet contrastive loss, L_triplet.
+            # Objective: force the network to mine the intrinsic normal manifold
+            # of time-series data.
             # ==========================================
             z_anchor = model.projection(h_anchors)
             z_pos    = model.projection(h_pos)
@@ -132,12 +138,15 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
             z_anchor = F.normalize(z_anchor, dim=1)
             z_pos    = F.normalize(z_pos, dim=1)
 
-            _sim_ap  = (z_anchor @ z_pos.T) / temperature         # 计算全局余弦相似度矩阵 (M, M)
-            pos_sims = _sim_ap.diag()                             # 获取正样本对相似度 (M,)
+            _sim_ap  = (z_anchor @ z_pos.T) / temperature         # Compute the global cosine similarity matrix (M, M).
+            pos_sims = _sim_ap.diag()                             # Obtain positive-pair similarities (M,).
 
-            # 最远负样本挖掘 (Farthest Negative Selection)
-            # 核心创新：区别于传统的 Hard-negative，为了防止将语义相似的正常模式误判为负样本，
-            # 此处强制选取当前 mini-batch 中余弦距离最远的 Patch 作为保守的负参考点 (Z_i^-)
+            # Farthest negative selection.
+            # Core idea: different from conventional hard-negative mining, this
+            # strategy avoids incorrectly treating semantically similar normal
+            # patterns as negative samples. It selects the patch with the largest
+            # cosine distance within the current mini-batch as a conservative
+            # negative reference point (Z_i^-).
             _sim_ap_f = _sim_ap.clone()
             _sim_ap_f.diagonal().fill_(+float('inf'))
             neg_dists = 1 - _sim_ap_f
@@ -148,17 +157,19 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
             triplet_loss = triplet_grad(triplet_loss)
 
             # ==========================================
-            # 模块 4: 时间代理判别器任务 (Temporal Pretext Task, L_pretext)
-            # 目标：纯对比学习易丢失时间流逝的方向性。此自监督二分类任务作为正则化项，
-            #       强迫网络学习时序演化的内在依赖规则。
+            # Module 4: temporal pretext discriminator task, L_pretext.
+            # Objective: pure contrastive learning can easily lose the directionality
+            # of temporal flow. This self-supervised binary classification task acts
+            # as a regularization term, forcing the network to learn intrinsic
+            # dependency rules of temporal evolution.
             # ==========================================
             if current_lambda_pretext > 0.0:
-                # 提取真实的物理连续对 (标签设为 1)
+                # Extract true physically continuous pairs with label 1.
                 h_pre = h_pretext[pretext_valid_mask]
                 h_anchor_pre = h_anchors[pretext_valid_mask]
                 h_concat_pre = torch.cat([h_anchor_pre, h_pre], dim=1)
 
-                # 生成随机打乱的非连续对 (标签设为 0)
+                # Generate randomly shuffled discontinuous pairs with label 0.
                 all_indices = torch.arange(M, device=device)
                 anchor_indices = all_indices.repeat_interleave(num_rand_patches)
                 rand_offsets = torch.randint(1, M, (M * num_rand_patches,), device=device)
@@ -183,7 +194,7 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
             else:
                 pretext_loss = torch.tensor(0.0, device=device)
 
-            # 融合双自监督损失进行反向传播
+            # Fuse the dual self-supervised losses for backpropagation.
             final_loss = triplet_loss + current_lambda_pretext * pretext_loss
 
             optimizer.zero_grad(set_to_none=True)
@@ -192,7 +203,7 @@ def train_model(model, train_loader, train_patches, device, num_iter=200, pretex
 
             pbar.update(1)
 
-            # 记录具有最优 Loss 的网络权重
+            # Record the network weights with the best loss.
             if final_loss.item() < best_loss:
                 best_loss = final_loss.item()
                 best_model_wts = copy.deepcopy(model.state_dict())
