@@ -69,7 +69,7 @@ def create_memory_bank(model, data_loader, device, num_cores=None):
 
 
 
-# Source code : https://github.com/decisionintelligence/CATCH/blob/master/ts_benchmark/baselines/catch/layers/RevIN.py
+# RevIN implementation adapted from a public open-source implementation.
 import torch
 import torch.nn as nn
 

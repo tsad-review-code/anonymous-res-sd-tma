@@ -5,14 +5,16 @@ from utils.utils import RevIN1d
 
 
 # ==========================================
-# 核心模块 1：时间均值注意力机制 (Temporal Mean Attention, TMA)
-# 作用：作为自适应低通滤波器，动态评估局部时间窗口的全局能量分布，
-#       有效平滑现实工业场景中的高频尖峰噪声。
+# Core Module 1: Temporal Mean Attention (TMA)
+# Function: acts as an adaptive low-pass filter by dynamically evaluating
+#           the global energy distribution within a local temporal window,
+#           effectively smoothing high-frequency spike noise in real-world
+#           industrial scenarios.
 # ==========================================
 class TMeanSEBlock1d(nn.Module):
     def __init__(self, channels, reduction=4):
         super(TMeanSEBlock1d, self).__init__()
-        # 确保降维后至少有 1 个维度
+        # Ensure that the reduced dimension is at least 1.
         reduced_channels = max(1, channels // reduction)
         self.fc1 = nn.Linear(channels, reduced_channels, bias=False)
         self.fc2 = nn.Linear(reduced_channels, channels, bias=False)
@@ -21,83 +23,103 @@ class TMeanSEBlock1d(nn.Module):
 
     def forward(self, x):
         b, c, l = x.size()
-        # 👑 全局均值池化 (剥离时间轴上的局部高频振荡，提取纯粹的通道能量描述符)
+        # Global mean pooling: removes local high-frequency oscillations along
+        # the temporal axis and extracts a pure channel-energy descriptor.
         y = x.mean(dim=2)  # [Batch, Channels]
 
         y = self.relu(self.fc1(y))
         y = self.sigmoid(self.fc2(y)).view(b, c, 1)
-        # 动态通道门控加权：自适应抑制高频噪声通道，同时放行包含低频异常演化的关键通道
+        # Dynamic channel-wise gating: adaptively suppresses high-frequency
+        # noise channels while preserving key channels that contain low-frequency
+        # anomaly evolution patterns.
         return x * y
 
 
 # ==========================================
-# 核心模块 2：残差时空解耦块 (Residual Spatiotemporal Decoupling, Res-SD Block)
-# 作用：严格隔离时间演化与空间拓扑特征的提取过程，防止多元物理量发生特征耦合；
-#       并通过残差连接防止梯度消失，保留原始信号的低频基线信息。
+# Core Module 2: Residual Spatiotemporal Decoupling Block (Res-SD Block)
+# Function: strictly decouples the extraction of temporal evolution features
+#           and spatial topological features to prevent feature coupling among
+#           multivariate physical variables. The residual connection mitigates
+#           gradient vanishing and preserves the low-frequency baseline
+#           information of the original signal.
 # ==========================================
 class ResSDBlock(nn.Module):
     def __init__(self, in_c, out_c, k):
         super(ResSDBlock, self).__init__()
-        # Step A: 物理隔离 (Depthwise)
-        # 强制卷积核仅在单一通道的时间轴上滑动，切断异构物理量间的交叉干扰
+        # Step A: Physical isolation (Depthwise)
+        # Forces each convolution kernel to slide only along the temporal axis
+        # of a single channel, cutting off cross-interference among heterogeneous
+        # physical variables.
         self.depthwise = nn.Conv1d(in_c, in_c, kernel_size=k, stride=1, padding=k // 2, groups=in_c, bias=False)
         self.bn1 = nn.BatchNorm1d(in_c)
 
-        # Step B: 拓扑融合 (Pointwise)
-        # 执行跨通道线性组合，重建多变量传感器网络的瞬态空间拓扑信息
+        # Step B: Topological fusion (Pointwise)
+        # Performs cross-channel linear combination to reconstruct transient
+        # spatial topological information in the multivariate sensor network.
         self.pointwise = nn.Conv1d(in_c, out_c, kernel_size=1, bias=False)
         self.bn2 = nn.BatchNorm1d(out_c)
 
-        # Step C: 时间均值注意力 (TMA 降噪模块)
+        # Step C: Temporal Mean Attention (TMA denoising module)
         self.se = TMeanSEBlock1d(out_c)
 
-        # 👑 残差短接连接 (Shortcut)
+        # Residual shortcut connection
         self.shortcut = nn.Sequential()
         if in_c != out_c:
-            # 如果通道数发生变化，用 1x1 卷积对齐维度，确保稳定传输
+            # If the number of channels changes, a 1x1 convolution is used to
+            # align dimensions and ensure stable feature transmission.
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_c, out_c, kernel_size=1, bias=False),
                 nn.BatchNorm1d(out_c)
             )
 
     def forward(self, x):
-        # 1. 留存原始信号备份 (用于后续保留低频基线)
+        # 1. Preserve a backup of the original signal for retaining the
+        # low-frequency baseline in the subsequent residual fusion.
         residual = self.shortcut(x)
 
-        # 2. 时空解耦特征提取 (先时间演化，后空间拓扑)
+        # 2. Spatiotemporal decoupled feature extraction:
+        # first temporal evolution extraction, then spatial topological fusion.
         out = self.depthwise(x)
         out = F.relu(self.bn1(out), inplace=True)
 
         out = self.pointwise(out)
         out = self.bn2(out)
 
-        # 3. 动态均值通道赋权 (自适应抑制高频尖峰噪声)
+        # 3. Dynamic mean-based channel weighting for adaptive suppression of
+        # high-frequency spike noise.
         out = self.se(out)
 
-        # 4. 残差相加 (将提纯后的异常特征与原始低频基线融合)
+        # 4. Residual addition: fuses purified anomaly-related features with the
+        # original low-frequency baseline.
         out += residual
         return F.relu(out, inplace=True)
 
 
 
 ''''# ==========================================
-# 消融实验版本：标准残差块 (无时空解耦 w/o SD)
-# 作用：将时间与空间重新混合，用于证明“解耦”机制在缓解多变量通道干扰方面的核心价值
+# Ablation version: standard residual block (without spatiotemporal decoupling, w/o SD)
+# Function: mixes temporal and spatial information again to demonstrate the core
+#           value of the decoupling mechanism in mitigating multivariate channel interference.
 # ==========================================
 class ResSDBlock(nn.Module):
     def __init__(self, in_c, out_c, k):
         super(ResSDBlock, self).__init__()
 
-        # 👑 消融修改：砍掉 Depthwise 和 Pointwise 的物理隔离机制！
-        # 换回标准的 1D 卷积，使不同物理含义的通道在提取时间特征时发生强制耦合
+        # Ablation modification: remove the physical isolation mechanism of
+        # Depthwise and Pointwise convolutions.
+        # Replace it with a standard 1D convolution, forcing channels with
+        # different physical meanings to be coupled during temporal feature extraction.
         self.standard_conv = nn.Conv1d(in_c, out_c, kernel_size=k, stride=1, padding=k // 2, bias=False)
         self.bn = nn.BatchNorm1d(out_c)
 
-        # 保持均值通道注意力的初始化（在 w/o TMA 实验中会被注释掉前向调用）
+        # Keep the initialization of mean-based channel attention.
+        # In the w/o TMA experiment, its forward call is commented out.
         self.se = TMeanSEBlock1d(out_c)
 
-        # 👑 保持残差短接连接 (Shortcut) 不变
-        # 确保性能差异完全来源于“解耦卷积”，排除网络深度变化带来的干扰
+        # Keep the residual shortcut connection unchanged.
+        # This ensures that performance differences originate only from the
+        # decoupled convolution mechanism, excluding interference caused by
+        # changes in network depth.
         self.shortcut = nn.Sequential()
         if in_c != out_c:
             self.shortcut = nn.Sequential(
@@ -106,17 +128,20 @@ class ResSDBlock(nn.Module):
             )
 
     def forward(self, x):
-        # 1. 留存原始信号备份
+        # 1. Preserve a backup of the original signal.
         residual = self.shortcut(x)
 
-        # 2. 传统特征提纯 (未解耦，时间和通道维度联合提取)
+        # 2. Conventional feature purification without decoupling:
+        # temporal and channel dimensions are jointly extracted.
         out = self.standard_conv(x)
         out = self.bn(out)
 
-        # 3. 动态均值赋权（在单纯验证解耦作用的实验中，保持注释状态以控制变量）
+        # 3. Dynamic mean-based weighting.
+        # In the experiment that purely verifies the effect of decoupling,
+        # this line is kept commented out to control variables.
         # out = self.se(out)
 
-        # 4. 残差相加
+        # 4. Residual addition.
         out += residual
         return F.relu(out, inplace=True)
 '''
@@ -134,14 +159,16 @@ class PatchEncoder(nn.Module):
         self.projection_dim = projection_dim
 
         # ====================================================
-        # ⚠️ 注意：由于前端引入了运动学扩展 (Kinematic Expansion)
-        # 如果输入是单变量 (in_channels=1)，它将被动态扩展为原始值、速度、加速度三个物理维度
-        # 因此第一层的实际输入通道数需要判定为 3
+        # Note: since the front-end Kinematic Expansion module is introduced,
+        # if the input is univariate (in_channels=1), it will be dynamically
+        # expanded into three physical dimensions: original value, velocity,
+        # and acceleration. Therefore, the actual input channel number of the
+        # first layer should be set to 3.
         # ====================================================
         self.actual_in_channels = 3 if in_channels == 1 else in_channels
         #self.actual_in_channels = in_channels
 
-        # 0. 基础抗漂移模块 (使用实际通道数初始化)
+        # 0. Basic anti-drift module initialized with the actual channel number.
         self.revin = None
         if use_revin:
             self.revin = RevIN1d(num_channels=self.actual_in_channels,
@@ -149,19 +176,19 @@ class PatchEncoder(nn.Module):
                                  min_sigma=revin_min_sigma,
                                  affine=revin_affine)
 
-        # 1. 构建残差时空解耦网络
+        # 1. Build the residual spatiotemporal decoupling network.
         blocks = []
         for i in range(len(self.layers)):
-            # 第一层的输入通道数使用 actual_in_channels
+            # Use actual_in_channels as the input channel number of the first layer.
             in_c = layers[i - 1] if i > 0 else self.actual_in_channels
             out_c = self.layers[i]
             k = self.kss[i]
-            # 直接调用残差解耦块
+            # Directly call the residual decoupling block.
             blocks.append(ResSDBlock(in_c, out_c, k))
 
         self.convblocks = nn.ModuleList(blocks)
 
-        # 2. 后端预测头 (保持接口严格一致)
+        # 2. Backend prediction heads while keeping the interface strictly consistent.
         self.fc_embedding = nn.AdaptiveAvgPool1d(output_size=1)
         self.projection_head = nn.Sequential(
             nn.Linear(self.layers[-1], self.projection_dim),
@@ -173,9 +200,11 @@ class PatchEncoder(nn.Module):
     def forward(self, x, return_embedding=False, return_projection=False):
 
         # ====================================================
-        # 👑 核心创新点：单变量运动学扩展 (Kinematic Expansion)
-        # 放置在网络最前端，通过计算离散一阶速度和二阶加速度，
-        # 将 1 维孤立序列扩展为 3 维动态状态空间，有效缓解单变量信息匮乏问题
+        # Core innovation: univariate Kinematic Expansion.
+        # Placed at the front end of the network, it computes the discrete
+        # first-order velocity and second-order acceleration, expanding an
+        # isolated 1D sequence into a 3D dynamic state space and effectively
+        # alleviating the information scarcity problem in univariate data.
         # ====================================================
         if x.size(1) == 1:
             v = torch.diff(x, dim=-1, prepend=x[:, :, :1])
@@ -183,18 +212,20 @@ class PatchEncoder(nn.Module):
             x = torch.cat([x, v, a], dim=1)
 
         # ====================================================
-        # 下游的常规流转：此时单变量已被补全为 C=3 的动态特征，或本身即为多变量输入
+        # Downstream flow: at this stage, univariate input has been expanded
+        # into C=3 dynamic features, while multivariate input remains unchanged.
         # ====================================================
 
-        # 1. 实例级归一化 (RevIN 此时会对所有物理通道分别做归一化，消除分布漂移)
+        # 1. Instance-level normalization.
+        # RevIN normalizes all physical channels separately to remove distribution drift.
         if self.revin is not None:
             x = self.revin.norm(x)
 
-        # 2. 依次穿过残差时空解耦网络
+        # 2. Pass through the residual spatiotemporal decoupling network sequentially.
         for block in self.convblocks:
             x = block(x)
 
-        # 3. 全局池化压缩为干净的一维表示 (1D clean embedding)
+        # 3. Global pooling compresses features into a clean 1D embedding.
         h = self.fc_embedding(x).flatten(start_dim=1)
 
         if return_embedding:
