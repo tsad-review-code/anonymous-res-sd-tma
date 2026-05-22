@@ -11,5 +11,6 @@ python main.py \
   --batch_size 512 \
   --lr 1e-4 \
   --seed 2027 \
-  --use_revin \
+  --use_revin 
+
 
